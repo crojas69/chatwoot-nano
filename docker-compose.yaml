@@ -1,119 +1,107 @@
-version: '3'
+version: "3.7"
 
 services:
-  base: &base
-    build:
-      context: .
-      dockerfile: ./docker/Dockerfile
-      args:
-        BUNDLE_WITHOUT: ''
-        EXECJS_RUNTIME: 'Node'
-        RAILS_ENV: 'development'
-        RAILS_SERVE_STATIC_FILES: 'false'
-    tty: true
-    stdin_open: true
-    image: chatwoot:development
-    env_file: .env
-
-  rails:
-    <<: *base
-    build:
-      context: .
-      dockerfile: ./docker/dockerfiles/rails.Dockerfile
-    image: chatwoot-rails:development
+  postgres:
+    image: ankane/pgvector
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: c03e2af6634b2227b45225af880089d6
+      POSTGRES_DB: chatwoot
     volumes:
-      - ./:/app:delegated
-      - node_modules:/app/node_modules
-      - packs:/app/public/packs
-      - cache:/app/tmp/cache
-      - bundle:/usr/local/bundle
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - appnet
+
+  redis:
+    image: redis:7
+    restart: always
+    networks:
+      - appnet
+
+  chatwoot:
+    image: chatwoot/chatwoot:v4.4.0
     depends_on:
       - postgres
       - redis
-      - vite
-      - mailhog
-      - sidekiq
-    ports:
-      - 3000:3000
-    env_file: .env
     environment:
-      - VITE_DEV_SERVER_HOST=vite
-      - NODE_ENV=development
-      - RAILS_ENV=development
-    entrypoint: docker/entrypoints/rails.sh
-    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+      RAILS_ENV: production
+      SECRET_KEY_BASE: 65cbd55fcbf61d1d803fe93d1353e15d
+      FRONTEND_URL: https://smarchat-nano.iabot.com.co
+      REDIS_URL: redis://redis:6379
+      POSTGRES_HOST: postgres
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: c03e2af6634b2227b45225af880089d6
+      POSTGRES_DATABASE: chatwoot
+      MAILER_SENDER_EMAIL: rbohorquez@iabot.com.co
+      SMTP_DOMAIN: iabot.com.co
+      SMTP_ADDRESS: smtp-relay.brevo.com
+      SMTP_PORT: 587
+      SMTP_USERNAME: 93bfdb001@smtp-brevo.com
+      SMTP_PASSWORD: xsmtpsib-4ee154c03dd0fdb253a4bf9f68918b682e6ea5a58633b791b052444d29f2645e-Aq92XhBbcxdntDsj
+      SMTP_AUTHENTICATION: login
+      SMTP_ENABLE_STARTTLS_AUTO: true
+      MAILER_INBOUND_EMAIL_DOMAIN: rbohorquez@iabot.com.co
+      RAILS_LOG_TO_STDOUT: true
+      ENABLE_ACCOUNT_SIGNUP: false
+    ports:
+      - "3000:3000"
+    networks:
+      - appnet
+    volumes:
+      - chatwoot_data:/app/storage
 
   sidekiq:
-    <<: *base
-    image: chatwoot-rails:development
-    volumes:
-      - ./:/app:delegated
-      - node_modules:/app/node_modules
-      - packs:/app/public/packs
-      - cache:/app/tmp/cache
-      - bundle:/usr/local/bundle
+    image: chatwoot/chatwoot:v4.4.0
     depends_on:
       - postgres
       - redis
-      - mailhog
+    command: bundle exec sidekiq -C config/sidekiq.yml
     environment:
-      - NODE_ENV=development
-      - RAILS_ENV=development
-    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+      RAILS_ENV: production
+      REDIS_URL: redis://redis:6379
+      POSTGRES_HOST: postgres
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: c03e2af6634b2227b45225af880089d6
+      POSTGRES_DATABASE: chatwoot
+      SECRET_KEY_BASE: 65cbd55fcbf61d1d803fe93d1353e15d
+    networks:
+      - appnet
 
-  vite:
-    <<: *base
-    build:
-      context: .
-      dockerfile: ./docker/dockerfiles/vite.Dockerfile
-    image: chatwoot-vite:development
-    volumes:
-      - ./:/app:delegated
-      - node_modules:/app/node_modules
-      - packs:/app/public/packs
-      - cache:/app/tmp/cache
-      - bundle:/usr/local/bundle
-    ports:
-      - "3036:3036" # Vite dev server
+  chatwoot_db_patch:
+    image: postgres:15
+    depends_on:
+      - postgres
+    restart: "no"
+    entrypoint: >
+      bash -c "
+        echo '⏳ Esperando la base de datos...';
+        sleep 10;
+        echo '🚀 Aplicando configuración Enterprise...';
+        psql -h postgres -U postgres -d chatwoot -c \"
+          UPDATE public.installation_configs
+          SET serialized_value = '--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\\nvalue: enterprise\\n'
+          WHERE name = 'INSTALLATION_PRICING_PLAN';
+        \";
+        psql -h postgres -U postgres -d chatwoot -c \"
+          UPDATE public.installation_configs
+          SET serialized_value = '--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\\nvalue: 10000\\n'
+          WHERE name = 'INSTALLATION_PRICING_PLAN_QUANTITY';
+        \";
+        psql -h postgres -U postgres -d chatwoot -c \"
+          UPDATE public.installation_configs
+          SET serialized_value = '--- !ruby/hash:ActiveSupport::HashWithIndifferentAccess\\nvalue: true\\n'
+          WHERE name = 'INSTALLATION_ENTERPRISE_ENABLED';
+        \";
+      "
     environment:
-      - VITE_DEV_SERVER_HOST=0.0.0.0
-      - NODE_ENV=development
-      - RAILS_ENV=development
-    entrypoint: docker/entrypoints/vite.sh
-    command: bin/vite dev
+      PGPASSWORD: c03e2af6634b2227b45225af880089d6
+    networks:
+      - appnet
 
-  postgres:
-    image: pgvector/pgvector:pg16
-    restart: always
-    ports:
-      - '5432:5432'
-    volumes:
-      - postgres:/data/postgres
-    environment:
-      - POSTGRES_DB=chatwoot
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=
-
-  redis:
-    image: redis:alpine
-    restart: always
-    command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
-    env_file: .env
-    volumes:
-      - redis:/data/redis
-    ports:
-      - '6379:6379'
-
-  mailhog:
-    image: mailhog/mailhog
-    ports:
-      - 1025:1025
-      - 8025:8025
+networks:
+  appnet:
 
 volumes:
-  postgres:
-  redis:
-  packs:
-  node_modules:
-  cache:
-  bundle:
+  pg_data:
+  chatwoot_data:
